@@ -1,38 +1,19 @@
-name: Agent Task Execution
+name: Agent Task Execution (Content)
 on:
   issues:
     types: [labeled]
 
-# Each issue gets its own concurrency group — new labels on the SAME issue
-# cancel the previous run, but different issues run in parallel
 concurrency:
   group: agent-issue-${{ github.event.issue.number }}
   cancel-in-progress: false
 
 jobs:
-  route:
-    if: startsWith(github.event.label.name, 'agent:')
-    runs-on: ubuntu-latest
-    outputs:
-      runner: ${{ steps.pick.outputs.runner }}
-    steps:
-      - name: Pick runner by label
-        id: pick
-        env:
-          LABEL: ${{ github.event.label.name }}
-        run: |
-          case "$LABEL" in
-            agent:seo-vi|agent:seo-cw3|agent:biz-dev)
-              echo "runner=content" >> $GITHUB_OUTPUT
-              ;;
-            *)
-              echo "runner=builder" >> $GITHUB_OUTPUT
-              ;;
-          esac
-
   execute:
-    needs: route
-    runs-on: [self-hosted, "${{ needs.route.outputs.runner }}"]
+    if: >-
+      github.event.label.name == 'agent:seo-vi' ||
+      github.event.label.name == 'agent:seo-cw3' ||
+      github.event.label.name == 'agent:biz-dev'
+    runs-on: [self-hosted, content]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,7 +31,6 @@ jobs:
       - name: Install dependencies and generate Prisma
         timeout-minutes: 30
         run: |
-          rm -rf .next
           if [ -f node_modules/.yarn-integrity ]; then
             echo "node_modules cached, skipping install"
           else
@@ -58,13 +38,12 @@ jobs:
           fi
           npx prisma generate 2>/dev/null || true
           npx prisma generate --schema=prisma/events/schema.prisma 2>/dev/null || true
-          npx playwright install chromium 2>/dev/null || true
           printf "DATABASE_URL=%s\nEVENTS_DATABASE_URL=%s\n" "$DATABASE_URL" "$EVENTS_DATABASE_URL" > .env.local
 
       - name: Determine role and execute
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          WORKFLOW_NAME: task-execute
+          WORKFLOW_NAME: task-execute-content
           GITHUB_RUN_ID: ${{ github.run_id }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
@@ -72,9 +51,9 @@ jobs:
           LABELS=$(gh issue view $ISSUE_NUMBER --json labels -q '.labels[].name')
           BODY=$(gh issue view $ISSUE_NUMBER --json body -q '.body')
 
-          PROMPT_FILE=".claude/agents/fullstack.md"
-          ROLE="fullstack"
-          for R in seo-vi seo-cw3 biz-dev fullstack devops; do
+          PROMPT_FILE=".claude/agents/seo-vi.md"
+          ROLE="seo-vi"
+          for R in seo-vi seo-cw3 biz-dev; do
             if echo "$LABELS" | grep -q "agent:$R"; then
               PROMPT_FILE=".claude/agents/${R}.md"
               ROLE="$R"
@@ -85,7 +64,7 @@ jobs:
           SYSTEM=$(cat "$PROMPT_FILE")
 
           ./agents-tools/run-agent.sh \
-            --agent "$ROLE" --role "${{ needs.route.outputs.runner }}" --trigger issue \
+            --agent "$ROLE" --role "content" --trigger issue \
             --issue "$ISSUE_NUMBER" \
             --prompt-file "$PROMPT_FILE" \
             -- "${SYSTEM}
@@ -94,33 +73,30 @@ jobs:
           DETAILS: ${BODY}
 
           Instructions:
-          1. Read CLAUDE.md for project conventions
-          2. Search codebase with DeepContext (index_codebase, then search_codebase) before writing any code
-          3. Read existing files in the area you will modify — match their patterns exactly
-          4. Implement the task following acceptance criteria and Code Style Rules from your prompt
-          5. If the task touches UI: you MUST verify visually before committing:
-             a. mkdir -p screenshots/
-             b. Start dev server and save its PID: yarn dev --port 3000 & echo \$! > /tmp/next-dev.pid
-             c. Wait for it: sleep 15
-             d. Take screenshot: npx playwright screenshot --browser chromium http://localhost:3000/en/<relevant-page> screenshots/issue-${ISSUE_NUMBER}.png
-             e. View the screenshot to confirm the UI looks correct
-             f. Stop the dev server using its saved PID: kill \$(cat /tmp/next-dev.pid) 2>/dev/null
-             CRITICAL: Do NOT use pkill, killall, or any command that kills processes by name.
-             These will kill the agent process itself. Only kill by specific PID.
-             If the dev server fails to start, write in Testing: 'Dev server failed: <reason>. Visual verification skipped.'
-             Do NOT invent fake screenshot URLs. Either attach a real path or say verification was not possible.
-          6. Run yarn lint before finishing
+          1. Read your context files listed in the agent prompt before starting
+          2. Read CLAUDE.md for project conventions
+          3. Query the database via Prisma for real data to back your content
+          4. Verify data freshness — if data looks stale, note it or skip that data point
+          5. Create the content as specified in the task:
+             - Blog articles: write to content/blog/ as markdown
+             - Social posts: write to content/social/ as markdown with platform prefix (twitter-, telegram-, discord-)
+             - SEO content: write to content/seo/ as markdown
+          6. Follow the Three-Level Autonomy from your prompt:
+             - Full autonomy (DB facts): commit directly
+             - Partial autonomy (opinions): note in PR body that review is needed
+             - Issue only (predictions): note in PR body that approval is required before publishing
           7. Write a PR description to .agent-pr-body.md (this file is gitignored, do NOT commit it) with this format:
              **What:** [1 sentence]
              **Why:** Closes #${ISSUE_NUMBER}
-             **How:** [bullet list of changes]
-             **Testing:** [what you verified: lint, build, Playwright screenshots if UI]
-             **Screenshot:** ![screenshot](screenshots/issue-${ISSUE_NUMBER}.png)
-             (only include Screenshot section if you actually took a Playwright screenshot)
-          8. Commit source code changes AND screenshots/ directory with message: feat: ${ISSUE_TITLE} (#${ISSUE_NUMBER})
+             **Content type:** [blog/twitter/telegram/discord/seo]
+             **Data sources:** [which DB queries or external sources used]
+             **Autonomy level:** [full/partial/issue-only — and why]
+             **Draft:** [paste the final content here for review]
+          8. Commit content files with message: content: ${ISSUE_TITLE} (#${ISSUE_NUMBER})
              Do NOT add any Co-Authored-By trailer to commit messages.
              Do NOT commit .agent-pr-body.md
-          9. Do NOT create PR, it will be created in the next step"
+          9. Do NOT create PR, it will be created in the next step
+          10. Do NOT use pkill, killall, or any command that kills processes by name"
 
           if [ $? -ne 0 ]; then
             echo "Agent failed. See monitoring.db for details."
@@ -146,11 +122,11 @@ jobs:
           else
             PR_BODY="Closes #${ISSUE_NUMBER}
 
-          Auto-generated by AI Agent."
+          Auto-generated by Content Agent."
           fi
 
           gh pr create \
-            --title "feat: ${ISSUE_TITLE}" \
+            --title "content: ${ISSUE_TITLE}" \
             --body "$PR_BODY" \
             --base updates/dev-update \
             --head "$BRANCH"
