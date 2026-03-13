@@ -21,13 +21,6 @@ jobs:
           fetch-depth: 0
           clean: false
 
-      - name: Create branch
-        id: branch
-        run: |
-          BRANCH="agent/issue-${{ github.event.issue.number }}"
-          git checkout -b "$BRANCH"
-          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
-
       - name: Install dependencies and generate Prisma
         timeout-minutes: 30
         run: |
@@ -47,6 +40,13 @@ jobs:
           GITHUB_RUN_ID: ${{ github.run_id }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
+          TWITTER_API_KEY: ${{ secrets.TWITTER_API_KEY }}
+          TWITTER_API_SECRET: ${{ secrets.TWITTER_API_SECRET }}
+          TWITTER_ACCESS_TOKEN: ${{ secrets.TWITTER_ACCESS_TOKEN }}
+          TWITTER_ACCESS_TOKEN_SECRET: ${{ secrets.TWITTER_ACCESS_TOKEN_SECRET }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           LABELS=$(gh issue view $ISSUE_NUMBER --json labels -q '.labels[].name')
           BODY=$(gh issue view $ISSUE_NUMBER --json body -q '.body')
@@ -75,58 +75,75 @@ jobs:
           Instructions:
           1. Read your context files listed in the agent prompt before starting
           2. Read CLAUDE.md for project conventions
-          3. Query the database via Prisma for real data to back your content
+          3. Query the database to discover available chains and data:
+             - First: SELECT name FROM chains to see what chains exist
+             - Then: query specific data relevant to the task
+             - NEVER hardcode chain names — always query the DB first
           4. Verify data freshness — if data looks stale, note it or skip that data point
-          5. Create the content as specified in the task:
-             - Blog articles: write to content/blog/ as markdown
-             - Social posts: write to content/social/ as markdown with platform prefix (twitter-, telegram-, discord-)
-             - SEO content: write to content/seo/ as markdown
-          6. Follow the Three-Level Autonomy from your prompt:
-             - Full autonomy (DB facts): commit directly
-             - Partial autonomy (opinions): note in PR body that review is needed
-             - Issue only (predictions): note in PR body that approval is required before publishing
-          7. Write a PR description to .agent-pr-body.md (this file is gitignored, do NOT commit it) with this format:
-             **What:** [1 sentence]
-             **Why:** Closes #${ISSUE_NUMBER}
-             **Content type:** [blog/twitter/telegram/discord/seo]
-             **Data sources:** [which DB queries or external sources used]
-             **Autonomy level:** [full/partial/issue-only — and why]
-             **Draft:** [paste the final content here for review]
-          8. Commit content files with message: content: ${ISSUE_TITLE} (#${ISSUE_NUMBER})
-             Do NOT add any Co-Authored-By trailer to commit messages.
-             Do NOT commit .agent-pr-body.md
-          9. Do NOT create PR, it will be created in the next step
-          10. Do NOT use pkill, killall, or any command that kills processes by name"
+          5. Create the content as specified in the task
+          6. Determine your autonomy level:
+             - Level 1: pure facts from DB (APR changed, new validator, slashing, TVL milestone)
+             - Level 2: responding to external content with our data
+             - Level 3: opinions, predictions, evaluations
+          7. Set autonomy label on this Issue:
+             gh issue edit ${ISSUE_NUMBER} --add-label 'autonomy:level-N'
+          8. Set content type label:
+             gh issue edit ${ISSUE_NUMBER} --add-label 'type:tweet' or 'type:thread'
+          9. Determine target platforms:
+             - Check labels: platform:twitter, platform:telegram, platform:discord
+             - If no platform labels: check task text for platform mentions
+             - If neither: post to ALL platforms (Twitter, Telegram, Discord)
+          10. If Level 1 or Level 2:
+              a. Check if API keys are configured (TWITTER_API_KEY, TELEGRAM_BOT_TOKEN, DISCORD_WEBHOOK_URL)
+              b. If keys exist: post via agents-tools/post-twitter.js, post-telegram.js, post-discord.js
+                 After EACH post, log it:
+                 ./agents-tools/log-social.sh --agent ${ROLE} --platform <platform> --action post \
+                   --account therealvalinfo --content '<post text>' \
+                   --result <success|failure> --response '<json response>'
+              c. Comment on Issue with Content Report (see format below)
+              d. Set labels: status:posted + platform:* for each platform posted to
+              e. Close the Issue
+              f. If keys NOT configured: fall through to Level 3 behavior
+          11. If Level 3 (or keys not configured):
+              a. Comment on Issue with Draft for Review (see format below)
+              b. Set label: status:pending-review
+              c. Do NOT close the Issue
+
+          Content Report format (for Level 1-2, after posting):
+          ## Content Report
+          **Autonomy Level:** [1 or 2] ([reason])
+          **Platforms:** [list]
+          ### Content
+          > [posted text]
+          ### Data Sources
+          - [DB queries and sources used]
+          ### Published Links
+          - Twitter: [url]
+          - Telegram: [url]
+          - Discord: posted
+          ### Agent Notes
+          [any notes]
+
+          Draft for Review format (for Level 3 or no API keys):
+          ## Draft for Review
+          **Autonomy Level:** [level] ([reason])
+          **Target Platforms:** [list]
+          **Reason for review:** [why not auto-post]
+          ### Draft
+          > [content text]
+          ### Data Sources
+          - [DB queries and sources used]
+          ### Agent Notes
+          [any notes]
+
+          Rules:
+          - NEVER hardcode chain names — always query the DB first
+          - Always cite data sources (DB query results, URLs)
+          - Stay within indexed networks with live data on validatorinfo.com
+          - Max 1-2 emojis per post
+          - Do NOT use pkill, killall, or any command that kills processes by name"
 
           if [ $? -ne 0 ]; then
             echo "Agent failed. See monitoring.db for details."
             exit 1
           fi
-
-      - name: Create PR
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          ISSUE_TITLE: ${{ github.event.issue.title }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-        run: |
-          BRANCH="${{ steps.branch.outputs.branch }}"
-          if [ "$(git log origin/updates/dev-update..$BRANCH --oneline | wc -l)" -eq 0 ]; then
-            echo "No commits to push"
-            exit 1
-          fi
-          git push origin "$BRANCH"
-
-          # Use agent-generated PR body if available, otherwise fallback
-          if [ -f .agent-pr-body.md ]; then
-            PR_BODY=$(cat .agent-pr-body.md)
-          else
-            PR_BODY="Closes #${ISSUE_NUMBER}
-
-          Auto-generated by Content Agent."
-          fi
-
-          gh pr create \
-            --title "content: ${ISSUE_TITLE}" \
-            --body "$PR_BODY" \
-            --base updates/dev-update \
-            --head "$BRANCH"
