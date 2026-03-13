@@ -87,20 +87,27 @@ jobs:
              - If no platform labels: check task text for platform mentions
              - If neither: post to ALL platforms (Twitter, Telegram, Discord)
           10. If Level 1 or Level 2:
-              a. Check if API keys are configured (TWITTER_API_KEY, TELEGRAM_BOT_TOKEN, DISCORD_WEBHOOK_URL)
-              b. If keys exist: post via agents-tools/post-twitter.js, post-telegram.js, post-discord.js
+              a. For EACH target platform, check if its API key is configured:
+                 - Twitter: TWITTER_API_KEY
+                 - Telegram: TELEGRAM_BOT_TOKEN
+                 - Discord: DISCORD_WEBHOOK_URL
+              b. Post to every platform where keys exist via agents-tools/post-twitter.js, post-telegram.js, post-discord.js
                  After EACH post, log it:
                  ./agents-tools/log-social.sh --agent ${ROLE} --platform <platform> --action post \
                    --account therealvalinfo --content '<post text>' \
                    --result <success|failure> --response '<json response>'
-              c. Comment on Issue with Content Report (see format below)
-              d. Set labels: status:posted + platform:* for each platform posted to
-              e. Close the Issue
-              f. If keys NOT configured: fall through to Level 3 behavior
-          11. If Level 3 (or keys not configured):
+              c. If at least one platform was posted to:
+                 - Comment on Issue with Content Report (include drafts for unposted platforms)
+                 - Set label: status:posted (NEVER combine with status:pending-review)
+                 - Set platform:* labels for each platform posted to
+                 - Close the Issue
+              d. If NO keys configured at all: fall through to Level 3 behavior
+          IMPORTANT: status:posted and status:pending-review are MUTUALLY EXCLUSIVE. Never set both.
+          11. If Level 3 (or NO keys configured at all):
               a. Comment on Issue with Draft for Review (see format below)
-              b. Set label: status:pending-review
+              b. Set label: status:pending-review (NEVER combine with status:posted)
               c. Do NOT close the Issue
+              d. Do NOT post to any platform, even if keys are available
 
           Content Report format (for Level 1-2, after posting):
           ## Content Report
